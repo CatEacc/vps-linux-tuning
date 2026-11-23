@@ -1,18 +1,34 @@
-# Linux VPS 底层内核与内存调优指南 (`vps-linux-tuning`)
+# Linux VPS 底层内核与内存调优指南（`vps-linux-tuning`）
 
-> 适用系统：Debian 11 / 12 / 13、Ubuntu 20.04 / 22.04 / 24.04（AMD64 / ARM64）。纯开源 Shell 脚本文本，零闭源二进制，方便直接审计。
+[![Linux](https://img.shields.io/badge/Linux-Debian%20%7C%20Ubuntu-blue?logo=linux&logoColor=white)](#)
+[![Kernel](https://img.shields.io/badge/Kernel-BBR%20%2B%20FQ-green)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Telegram](https://img.shields.io/badge/Telegram-%E7%8C%ABe%2Facc-26A5E4?logo=telegram)](https://t.me/CatCryptoMaster)
+
+> **仓库地址**：`github.com/CatEacc/vps-linux-tuning`  
+> **适用系统**：Debian 11 / 12 / 13、Ubuntu 20.04 / 22.04 / 24.04（AMD64 / ARM64），纯开源 Shell 文本无闭源二进制，方便直接审计。
+
+---
+
+## 一键执行（3 种模式可选）
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/main/tune.sh)
+```
+
+---
 
 ## 核心解决的 5 个运维痛点
 
 1. **512M / 1G 小内存防 OOM（按内存分档网络缓冲）**：
-   - 不再无脑套用 64MB 缓冲区导致小鸡并发高时触发 OOM Killer。
-   - 自动识别物理内存分三档：`<=700MB`（16M/8M/256K）、`700MB~1500MB`（32M/16M/512K）、`>=1500MB`（64M/32M/1M），配合 1GB Swap 气囊与 `vm.swappiness=10`。
+   - 不再无脑套用 64MB 缓冲区导致小内存机器并发高时触发 OOM Killer。
+   - 自动识别物理内存分三档：`<=700MB`（16M/8M/256K）、`700MB~1500MB`（32M/16M/512K）、`>=1500MB`（64M/32M/1M），配合 1GB Swap 兜底与 `vm.swappiness=10`。
 2. **`/etc/sysctl.d/99-zzz-network-tuning.conf` 防重启覆盖**：
    - 利用 `systemd-sysctl` 字典序加载机制排在末尾兜底，彻底防止云镜像自带的 `99-cloudimg-*.conf` / `99-sysctl.conf` 重启后覆盖调优参数。
    - 使用官方 `-` 前缀兼容不同内核模块（`-net.mptcp.enabled = 0`、`-net.netfilter.nf_conntrack_max`）。
 3. **`systemd-journald` 日志与内存映射收敛**：
    - 同时锁定 `SystemMaxUse=50M`、`SystemMaxFileSize=10M`、`RuntimeMaxUse=20M`，防止小硬盘被日志写满并压低常驻 RSS。
-4. **Hyper-V `hv_balloon` 动态内存抽水排查与防护**：
+4. **Hyper-V `hv_balloon` 动态内存回收（Memory Ballooning）排查与防护**：
    - 自动检测 `hv_balloon` 模块；在用户二次确认后自动备份 `/etc/default/grub`、写入 `modprobe` + GRUB 黑名单，并在 `update-grub` 后强校验根分区 UUID（校验失败自动回滚）。
    - *注：部分超售 Hyper-V 商家 TOS 可能不允许禁用动态内存驱动，动手前请先确认商家条款。*
 5. **Hyper-V 虚拟网卡 `GRO` 合包异常修复**：
@@ -20,13 +36,7 @@
 
 ---
 
-## 一键执行
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/main/tune.sh)
-```
-
-也支持命令行直达模式：
+## 命令行直达模式
 
 ```bash
 # 模式 1：一键全套底层调优
