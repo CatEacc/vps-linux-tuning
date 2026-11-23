@@ -10,7 +10,7 @@
 
 ---
 
-## 一键执行（3 种模式可选）
+## 一键执行（4 种模式 · 改前自动快照支持一键回滚）
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/main/tune.sh)
@@ -47,6 +47,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/mai
 
 # 模式 3：只读系统体检（零修改）
 bash <(curl -fsSL https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/main/tune.sh) 3
+
+# 模式 4：一键回滚还原（恢复脚本修改前的原厂快照）
+bash <(curl -fsSL https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/main/tune.sh) 4
 ```
 
 ---

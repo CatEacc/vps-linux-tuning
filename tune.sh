@@ -3,12 +3,15 @@
 # Linux VPS 底层内核与内存调优一键脚本 (CatEacc/vps-linux-tuning)
 # 适用系统: Debian 11/12/13, Ubuntu 20.04/22.04/24.04 (AMD64 / ARM64)
 # 功能菜单:
-#   1) 一键全套底层调优 (按内存分档缓冲 + 99-zzz 防覆盖 + BBR/FQ + 1G Swap + Journald 50M + Fail2ban)
-#   2) Hyper-V 虚拟化专项排查与加固 (检测 hv_balloon 动态内存抽水 / 持久化关闭网卡 GRO)
+#   1) 一键全套底层调优 (改前自动存原厂快照 + 分档缓冲 + 99-zzz + BBR/FQ + 1G Swap + Journald 50M + Fail2ban)
+#   2) Hyper-V 虚拟化专项排查与加固 (检测 hv_balloon 动态内存回收 / 持久化关闭网卡 GRO)
 #   3) 只读系统体检 (查看当前内存、Swap、BBR、缓冲区档位、Journald 与虚拟化状态)
+#   4) 一键回滚还原 (恢复脚本修改前的原厂内核参数、日志、Swap 与虚拟化配置)
 # ==============================================================================
 
 set -euo pipefail
+
+BACKUP_DIR="/var/backups/vps-linux-tuning"
 
 if [ "$(id -u)" != "0" ]; then
     echo "[错误] 必须以 root 用户运行此脚本！请先执行 sudo -i"
@@ -70,7 +73,7 @@ BANNER
 }
 
 # ------------------------------------------------------------------------------
-# 0. 交互菜单（也支持命令行传参: bash tune.sh [1|2|3]）
+# 0. 交互菜单（也支持命令行传参: bash tune.sh [1|2|3|4]）
 # ------------------------------------------------------------------------------
 MODE="${1:-}"
 if [ -z "$MODE" ]; then
@@ -78,7 +81,7 @@ if [ -z "$MODE" ]; then
     printf '\n'
     print_cateacc_logo
     printf '\n'
-    printf "  ${CYAN}猫e/acc (CatEacc)${R} ${DIM}· Linux VPS 底层内核与内存调优脚本 ${YELLOW}v1.0${R}\n"
+    printf "  ${CYAN}猫e/acc (CatEacc)${R} ${DIM}· Linux VPS 底层内核与内存调优脚本 ${YELLOW}v1.1.0${R}\n"
     printf "  ${GREEN}──────────────────────────────────────────────────────────${R}\n"
     printf "  ${SKY}OS:${R}       ${GREEN}${OS_INFO} (${ARCH_INFO})${R}\n"
     printf "  ${SKY}Kernel:${R}   ${GREEN}${KERNEL_INFO}${R}  ${DIM}|${R}  ${SKY}Virt:${R} ${GREEN}${VIRT_STAT}${R}  ${DIM}|${R}  ${SKY}NIC:${R} ${CYAN}${DEFAULT_IFACE}${R}\n"
@@ -87,13 +90,15 @@ if [ -z "$MODE" ]; then
     printf "  ${SKY}Channel:${R}  ${CYAN}https://t.me/CatCryptoMaster${R}\n"
     printf "  ${GREEN}──────────────────────────────────────────────────────────${R}\n\n"
     printf "  ${WHITE}请选择操作模式：${R}\n"
-    printf "  ${GREEN}[1]${R} ${WHITE}一键全套底层调优${R} ${CYAN}★ 推荐${R}\n"
+    printf "  ${GREEN}[1]${R} ${WHITE}一键全套底层调优${R} ${CYAN}★ 推荐 · 改前自动快照${R}\n"
     printf "      ${DIM}按物理内存分档缓冲 + 99-zzz 防覆盖 + BBR/FQ + 1G Swap + Journald 50M + Fail2ban${R}\n"
     printf "  ${GREEN}[2]${R} ${WHITE}Hyper-V 虚拟化专项排查与加固${R} ${YELLOW}· hv_balloon / GRO${R}\n"
-    printf "      ${DIM}检测动态内存气球抽水（确认后写 GRUB 黑名单）+ 持久化关闭网卡 GRO 合包${R}\n"
+    printf "      ${DIM}检测动态内存回收（确认后写 GRUB 黑名单）+ 持久化关闭网卡 GRO 合包${R}\n"
     printf "  ${GREEN}[3]${R} ${WHITE}只读系统体检${R} ${PINK}· 零修改${R}\n"
-    printf "      ${DIM}输出当前内存、Swap、BBR、缓冲区上限、Journald 占用与 Hyper-V 驱动状态${R}\n\n"
-    read -rp "$(printf "${YELLOW}  请输入模式编号 [1-3] (回车默认 1): ${R}")" MODE
+    printf "      ${DIM}输出当前内存、Swap、BBR、缓冲区上限、Journald 占用与 Hyper-V 驱动状态${R}\n"
+    printf "  ${GREEN}[4]${R} ${WHITE}一键回滚还原${R} ${ORANGE}· 恢复原厂快照${R}\n"
+    printf "      ${DIM}撤销本脚本写入的 sysctl / Journald / Fail2ban / Swap / GRO 与 GRUB 修改${R}\n\n"
+    read -rp "$(printf "${YELLOW}  请输入模式编号 [1-4] (回车默认 1): ${R}")" MODE
     MODE="${MODE:-1}"
 fi
 
@@ -130,17 +135,54 @@ run_audit() {
 }
 
 # ------------------------------------------------------------------------------
+# 修改前自动存原厂快照（仅首次存档，重复运行不覆盖原厂值）
+# ------------------------------------------------------------------------------
+save_snapshot() {
+    if [ -f "${BACKUP_DIR}/snapshot.done" ]; then
+        return 0
+    fi
+    (
+        umask 077
+        mkdir -p "$BACKUP_DIR"
+        [ -f /etc/systemd/journald.conf ] && cp -a /etc/systemd/journald.conf "${BACKUP_DIR}/journald.conf.bak"
+        [ -f /etc/fail2ban/jail.local ] && cp -a /etc/fail2ban/jail.local "${BACKUP_DIR}/jail.local.bak"
+        [ -f /etc/security/limits.d/99-nofile.conf ] && cp -a /etc/security/limits.d/99-nofile.conf "${BACKUP_DIR}/99-nofile.conf.bak"
+        : > "${BACKUP_DIR}/sysctl_orig.conf"
+        for key in \
+            net.core.default_qdisc net.ipv4.tcp_congestion_control net.mptcp.enabled \
+            net.core.somaxconn net.core.netdev_max_backlog net.ipv4.tcp_max_syn_backlog \
+            net.ipv4.ip_local_port_range net.ipv4.tcp_tw_reuse net.ipv4.tcp_fin_timeout \
+            net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_keepalive_probes \
+            net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_mtu_probing \
+            net.ipv4.tcp_no_metrics_save net.ipv4.tcp_ecn net.core.rmem_max net.core.wmem_max \
+            net.core.rmem_default net.core.wmem_default net.ipv4.udp_rmem_min net.ipv4.udp_wmem_min \
+            net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_fastopen net.ipv4.tcp_notsent_lowat \
+            net.ipv4.tcp_adv_win_scale net.netfilter.nf_conntrack_max \
+            net.netfilter.nf_conntrack_udp_timeout net.netfilter.nf_conntrack_udp_timeout_stream \
+            fs.file-max vm.swappiness; do
+            val=$(sysctl -n "$key" 2>/dev/null || true)
+            if [ -n "$val" ]; then
+                printf "%s = %s\n" "$key" "$(echo "$val" | tr '\t' ' ' | tr -s ' ')" >> "${BACKUP_DIR}/sysctl_orig.conf"
+            fi
+        done
+        date -u +"%Y-%m-%dT%H:%M:%SZ" > "${BACKUP_DIR}/snapshot.done"
+    )
+    echo "[快照] 已自动保存原厂内核与配置快照至 ${BACKUP_DIR}（随时可用模式 4 一键回滚）"
+}
+
+# ------------------------------------------------------------------------------
 # 模式 1：一键全套底层调优
 # ------------------------------------------------------------------------------
 run_full_tune() {
     echo ""
+    save_snapshot
     echo "[1/4] 安装基础运维组件 (chrony / fail2ban / ethtool)..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y curl chrony fail2ban python3-systemd ethtool >/dev/null 2>&1 || \
       apt-get install -y curl chrony fail2ban ethtool
 
-    echo "[2/4] 配置 NTP 对时、1GB Swap 气囊与 Journald 50M 限额..."
+    echo "[2/4] 配置 NTP 对时、1GB Swap 兜底与 Journald 50M 限额..."
     systemctl enable --now chrony 2>/dev/null || true
     chronyc makestep >/dev/null 2>&1 || true
 
@@ -149,6 +191,7 @@ run_full_tune() {
         chmod 600 /swapfile
         mkswap /swapfile >/dev/null
         swapon /swapfile || true
+        touch "${BACKUP_DIR}/swap_created_by_script"
     fi
     grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
     if [ -f /swap.img ] && [ "$(stat -c%s /swap.img 2>/dev/null || echo 1073741824)" -lt 943718400 ]; then
@@ -331,12 +374,81 @@ EOF
     fi
 }
 
+# ------------------------------------------------------------------------------
+# 模式 4：一键回滚还原（恢复原厂快照）
+# ------------------------------------------------------------------------------
+run_rollback() {
+    echo ""
+    printf "  ${YELLOW}即将撤销 vps-linux-tuning 写入的系统调优并恢复原厂快照。${R}\n"
+    read -rp "确认执行一键回滚还原？[y/N]: " DO_RB
+    if [[ ! "${DO_RB:-n}" =~ ^[Yy]$ ]]; then
+        echo "  已取消回滚。"
+        return 0
+    fi
+
+    echo "[1/4] 移除 99-zzz 内核配置文件并恢复原厂 sysctl 运行态参数..."
+    rm -f /etc/sysctl.d/99-zzz-network-tuning.conf /etc/modules-load.d/99-network-tuning.conf
+    if [ -f "${BACKUP_DIR}/sysctl_orig.conf" ]; then
+        while IFS='=' read -r k v; do
+            [ -n "${k:-}" ] && sysctl -w "$(echo "$k" | xargs)=$(echo "$v" | xargs)" >/dev/null 2>&1 || true
+        done < "${BACKUP_DIR}/sysctl_orig.conf"
+    fi
+    sysctl --system >/dev/null 2>&1 || true
+
+    echo "[2/4] 恢复 Journald、nofile 与 Fail2ban 配置..."
+    if [ -f "${BACKUP_DIR}/journald.conf.bak" ]; then
+        cp -a "${BACKUP_DIR}/journald.conf.bak" /etc/systemd/journald.conf
+        systemctl restart systemd-journald 2>/dev/null || true
+    fi
+    if [ -f "${BACKUP_DIR}/99-nofile.conf.bak" ]; then
+        cp -a "${BACKUP_DIR}/99-nofile.conf.bak" /etc/security/limits.d/99-nofile.conf
+    else
+        rm -f /etc/security/limits.d/99-nofile.conf
+    fi
+    if [ -f "${BACKUP_DIR}/jail.local.bak" ]; then
+        cp -a "${BACKUP_DIR}/jail.local.bak" /etc/fail2ban/jail.local
+        systemctl restart fail2ban 2>/dev/null || true
+    elif [ -f /etc/fail2ban/jail.local ] && [ -f "${BACKUP_DIR}/snapshot.done" ]; then
+        rm -f /etc/fail2ban/jail.local
+        systemctl restart fail2ban 2>/dev/null || true
+    fi
+
+    echo "[3/4] 检查并清理本脚本新建的 Swap..."
+    if [ -f "${BACKUP_DIR}/swap_created_by_script" ] && [ -f /swapfile ]; then
+        swapoff /swapfile 2>/dev/null || true
+        sed -i '\|/swapfile|d' /etc/fstab
+        rm -f /swapfile "${BACKUP_DIR}/swap_created_by_script"
+    fi
+
+    echo "[4/4] 检查并还原网卡 GRO 与 Hyper-V GRUB 配置..."
+    if [ -f /etc/systemd/system/nic-gro-off.service ]; then
+        systemctl disable --now nic-gro-off.service >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/nic-gro-off.service
+        systemctl daemon-reload
+        command -v ethtool >/dev/null 2>&1 && ethtool -K "$DEFAULT_IFACE" gro on >/dev/null 2>&1 || true
+    fi
+    if [ -f /etc/modprobe.d/blacklist-hv_balloon.conf ] && [ -f /root/grub.default.bak ]; then
+        rm -f /etc/modprobe.d/blacklist-hv_balloon.conf
+        cp -a /root/grub.default.bak /etc/default/grub
+        update-initramfs -u >/dev/null 2>&1 || true
+        update-grub >/dev/null 2>&1 || true
+        echo "  [提示] 已还原 Hyper-V GRUB 配置，重启后恢复原厂 hv_balloon 状态。"
+    fi
+
+    printf "  ${GREEN}──────────────────────────────────────────────────────────${R}\n"
+    printf "  ${WHITE}一键回滚还原完成！${R}\n"
+    echo "  当前拥塞控制 : $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo N/A) + $(sysctl -n net.core.default_qdisc 2>/dev/null || echo N/A)"
+    echo "  快照备份目录 : ${BACKUP_DIR}（已保留以备查验）"
+    printf "  ${GREEN}──────────────────────────────────────────────────────────${R}\n"
+}
+
 case "$MODE" in
     1) run_full_tune ;;
     2) run_hyperv_fix ;;
     3) run_audit ;;
+    4) run_rollback ;;
     *)
-        echo "[错误] 无效的模式编号: ${MODE}，仅支持 1 / 2 / 3"
+        echo "[错误] 无效的模式编号: ${MODE}，仅支持 1 / 2 / 3 / 4"
         exit 1
         ;;
 esac
