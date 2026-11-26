@@ -1,0 +1,25 @@
+name: Shell Syntax & Security Check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Bash syntax check (bash -n)
+        run: |
+          bash -n tune.sh
+          echo "tune.sh syntax OK"
+
+      - name: ShellCheck error-level audit
+        run: |
+          shellcheck -S error tune.sh
+          echo "ShellCheck error-level audit OK"
