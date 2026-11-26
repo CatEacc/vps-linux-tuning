@@ -119,10 +119,13 @@ run_audit() {
     echo "  rmem_max / default  : $(sysctl -n net.core.rmem_max 2>/dev/null || echo N/A) / $(sysctl -n net.core.rmem_default 2>/dev/null || echo N/A)"
     echo "  tcp_rmem            : $(sysctl -n net.ipv4.tcp_rmem 2>/dev/null || echo N/A)"
     echo "  Journald 磁盘占用   : $(journalctl --disk-usage 2>/dev/null | sed 's/Archived and active journals take up //; s/ in the file system\.//' || echo N/A)"
-    if command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -Eq 'dport 25[[:space:]].*(reject|drop)'; then
-        echo "  出站 TCP 25 防护    : 已封禁 (nftables)"
+    if command -v nft >/dev/null 2>&1 && (
+        nft list table inet smtp_guard 2>/dev/null | grep -Eq 'dport 25[[:space:]].*(reject|drop)' ||
+        nft list ruleset 2>/dev/null | awk '/hook output/{f=1} /^\t\}/{f=0} f && /dport 25.*(reject|drop)/{ok=1} END{exit !ok}'
+    ); then
+        echo "  出站 TCP 25 防护    : 已封禁 (nftables output)"
     else
-        echo "  出站 TCP 25 防护    : 未检测到封禁规则（可运行模式 1 自动加固）"
+        echo "  出站 TCP 25 防护    : 未检测到出站封禁规则（可运行模式 1 自动加固）"
     fi
     if lsmod 2>/dev/null | grep -q "^hv_balloon"; then
         echo "  Hyper-V hv_balloon  : [已加载] 宿主机可动态回收空闲内存"
@@ -251,7 +254,7 @@ ExecStop=/usr/sbin/nft delete table inet smtp_guard
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload && systemctl enable smtp-guard.service >/dev/null 2>&1 || true
+        systemctl daemon-reload && systemctl enable --now smtp-guard.service >/dev/null 2>&1 || true
     fi
 
     cat << 'EOF' > /etc/systemd/journald.conf
@@ -365,7 +368,11 @@ EOF
     echo "  已套用档位 : ${TIER}"
     echo "  拥塞控制   : $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo N/A) + $(sysctl -n net.core.default_qdisc 2>/dev/null || echo N/A)"
     echo "  Swap 总量  : $(LC_ALL=C free -m | awk '/^Swap:/ {print $2}') MB (swappiness=10)"
-    echo "  出站 TCP 25: 已封禁 (smtp-guard.service)"
+    if command -v nft >/dev/null 2>&1 && nft list table inet smtp_guard 2>/dev/null | grep -Eq 'dport 25[[:space:]].*(reject|drop)'; then
+        echo "  出站 TCP 25: 已封禁 (smtp-guard.service)"
+    else
+        echo "  出站 TCP 25: 未生效（当前环境可能不支持 nftables）"
+    fi
     echo "  持久化文件 : /etc/sysctl.d/99-zzz-network-tuning.conf"
     printf "  ${GREEN}──────────────────────────────────────────────────────────${R}\n"
 }
@@ -414,28 +421,39 @@ EOF
         echo "  [提醒] 部分超售 Hyper-V 商家 TOS 可能不允许禁用气球驱动，操作前请先确认商家条款。"
         read -rp "是否写入 modprobe + GRUB 黑名单以屏蔽 hv_balloon？[y/N]: " DO_BALLOON
         if [[ "${DO_BALLOON:-n}" =~ ^[Yy]$ ]]; then
-            mkdir -p "$BACKUP_DIR" /etc/default/grub.d
-            [ -f "${BACKUP_DIR}/grub.default.bak" ] || cp -a /etc/default/grub "${BACKUP_DIR}/grub.default.bak"
-            printf "blacklist hv_balloon\n" > /etc/modprobe.d/blacklist-hv_balloon.conf
-            cat << 'EOF' > /etc/default/grub.d/99-zz-hv-balloon.cfg
+            if ! command -v update-grub >/dev/null 2>&1 || [ ! -f /etc/default/grub ]; then
+                echo "  [提示] 当前系统未使用标准 GRUB（缺少 update-grub 或 /etc/default/grub），已跳过 GRUB 修改。"
+            else
+                mkdir -p "$BACKUP_DIR" /etc/default/grub.d
+                [ -f "${BACKUP_DIR}/grub.default.bak" ] || cp -a /etc/default/grub "${BACKUP_DIR}/grub.default.bak"
+                printf "blacklist hv_balloon\n" > /etc/modprobe.d/blacklist-hv_balloon.conf
+                cat << 'EOF' > /etc/default/grub.d/99-zz-hv-balloon.cfg
 GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+$GRUB_CMDLINE_LINUX }modprobe.blacklist=hv_balloon"
 EOF
-            GRUB_OK="0"
-            if update-initramfs -u && update-grub; then
-                ROOT_UUID=$(findmnt -no UUID / || true)
-                if [ -n "$ROOT_UUID" ] && grep -q "$ROOT_UUID" /boot/grub/grub.cfg 2>/dev/null && grep -q "modprobe.blacklist=hv_balloon" /boot/grub/grub.cfg 2>/dev/null; then
-                    GRUB_OK="1"
+                GRUB_OK="0"
+                GRUB_CFG="/boot/grub/grub.cfg"
+                [ ! -f "$GRUB_CFG" ] && [ -f /boot/grub2/grub.cfg ] && GRUB_CFG="/boot/grub2/grub.cfg"
+                if update-initramfs -u && update-grub; then
+                    ROOT_UUID=$(findmnt -no UUID / || true)
+                    ROOT_SRC=$(findmnt -no SOURCE / || true)
+                    if [ -f "$GRUB_CFG" ] && grep -q "modprobe.blacklist=hv_balloon" "$GRUB_CFG" 2>/dev/null && (
+                        { [ -n "$ROOT_UUID" ] && grep -q "$ROOT_UUID" "$GRUB_CFG" 2>/dev/null; } ||
+                        { [ -n "$ROOT_SRC" ] && grep -Fq "root=$ROOT_SRC" "$GRUB_CFG" 2>/dev/null; } ||
+                        grep -Eq '^[[:space:]]*linux(efi)?[[:space:]]+/' "$GRUB_CFG" 2>/dev/null
+                    ); then
+                        GRUB_OK="1"
+                    fi
                 fi
-            fi
-            if [ "$GRUB_OK" = "1" ]; then
-                echo "  [校验通过] GRUB 根分区 UUID 完整，已备份原配置至 ${BACKUP_DIR}/grub.default.bak。"
-                echo "  闲时执行 systemctl reboot 即可生效并恢复完整初始内存。"
-            else
-                echo "  [警告] GRUB 校验未通过！已自动完整回滚 modprobe 与 GRUB 配置，请勿强行重启。"
-                rm -f /etc/modprobe.d/blacklist-hv_balloon.conf /etc/default/grub.d/99-zz-hv-balloon.cfg
-                [ -f "${BACKUP_DIR}/grub.default.bak" ] && cp -a "${BACKUP_DIR}/grub.default.bak" /etc/default/grub
-                update-initramfs -u >/dev/null 2>&1 || true
-                update-grub >/dev/null 2>&1 || true
+                if [ "$GRUB_OK" = "1" ]; then
+                    echo "  [校验通过] GRUB 引导项与黑名单参数完整，已备份原配置至 ${BACKUP_DIR}/grub.default.bak。"
+                    echo "  闲时执行 systemctl reboot 即可生效并恢复完整初始内存。"
+                else
+                    echo "  [警告] GRUB 校验未通过！已自动完整回滚 modprobe 与 GRUB 配置，请勿强行重启。"
+                    rm -f /etc/modprobe.d/blacklist-hv_balloon.conf /etc/default/grub.d/99-zz-hv-balloon.cfg
+                    [ -f "${BACKUP_DIR}/grub.default.bak" ] && cp -a "${BACKUP_DIR}/grub.default.bak" /etc/default/grub
+                    update-initramfs -u >/dev/null 2>&1 || true
+                    update-grub >/dev/null 2>&1 || true
+                fi
             fi
         fi
     else
@@ -474,7 +492,7 @@ run_rollback() {
     fi
     if [ -f "${BACKUP_DIR}/99-nofile.conf.bak" ]; then
         cp -a "${BACKUP_DIR}/99-nofile.conf.bak" /etc/security/limits.d/99-nofile.conf
-    else
+    elif [ -f "${BACKUP_DIR}/snapshot.done" ]; then
         rm -f /etc/security/limits.d/99-nofile.conf
     fi
     if [ -f "${BACKUP_DIR}/jail.local.bak" ]; then
