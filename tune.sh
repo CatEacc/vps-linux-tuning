@@ -28,7 +28,7 @@ SWAP_SHOW=$(LC_ALL=C free -m 2>/dev/null | awk '/^Swap:/ {print $2}')
 SWAP_SHOW="${SWAP_SHOW:-0}"
 BBR_STAT=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
 VIRT_STAT=$(systemd-detect-virt 2>/dev/null || echo "unknown")
-DEFAULT_IFACE=$( (ip -4 route show default 2>/dev/null; ip -6 route show default 2>/dev/null) | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' || true )
+DEFAULT_IFACE=$( (ip -4 route show default 2>/dev/null; ip -6 route show default 2>/dev/null) | awk '{for(i=1;i<=NF;i++) if($i=="dev" && $(i+1)!~/^(lo|tun.*|tap.*|wg.*|tailscale.*|Meta|utun.*)$/){print $(i+1); exit}}' || true )
 DEFAULT_IFACE="${DEFAULT_IFACE:-eth0}"
 
 # 256 色丝滑渐变配色
@@ -101,7 +101,7 @@ if [ -z "$MODE" ]; then
     printf "      ${DIM}输出当前内存、Swap、BBR、缓冲区上限、TCP 25 防护、Journald 与 Hyper-V 状态${R}\n"
     printf "  ${GREEN}[4]${R} ${WHITE}一键回滚还原${R} ${ORANGE}· 恢复原厂快照${R}\n"
     printf "      ${DIM}撤销本脚本写入的 sysctl / Journald / Fail2ban / Swap / GRO 与 GRUB 修改${R}\n\n"
-    read -rp "$(printf "${YELLOW}  请输入模式编号 [1-4] (回车默认 1): ${R}")" MODE
+    read -rp "$(printf "${YELLOW}  请输入模式编号 [1-4] (回车默认 1): ${R}")" MODE || MODE="1"
     MODE="${MODE:-1}"
 fi
 
@@ -262,6 +262,7 @@ EOF
     else
         F2B_BACKEND="auto"
         FWD_SYSLOG="yes"
+        [ -f /var/log/auth.log ] || touch /var/log/auth.log
     fi
 
     cat << EOF > /etc/systemd/journald.conf
@@ -294,7 +295,15 @@ EOF
         RMEM_MAX=67108864; TCP_MAX=33554432; DEF_BUF=1048576; CONN_MAX=131072
     fi
 
-    # 避免代理脚本遗留的 99-zzz-proxy-tuning.conf（字典序 p > n）在重启后覆盖本脚本分档参数
+    # 避免代理脚本遗留的 99-zzz-proxy-tuning.conf（字典序 p > n）在重启后覆盖本脚本分档参数，同时保留既有 ip_forward=1
+    if [ -f /etc/sysctl.d/99-zzz-proxy-tuning.conf ] && [ ! -f "${BACKUP_DIR}/99-zzz-proxy-tuning.conf.bak" ]; then
+        mkdir -p "$BACKUP_DIR"
+        cp -a /etc/sysctl.d/99-zzz-proxy-tuning.conf "${BACKUP_DIR}/99-zzz-proxy-tuning.conf.bak"
+    fi
+    FWD_LINE=""
+    if [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null || echo 0)" = "1" ] || grep -Eq '^[[:space:]]*net\.ipv4\.ip_forward[[:space:]]*=[[:space:]]*1' /etc/sysctl.d/99-zzz-proxy-tuning.conf 2>/dev/null; then
+        FWD_LINE="net.ipv4.ip_forward = 1"
+    fi
     rm -f /etc/sysctl.d/99-zzz-proxy-tuning.conf
     cat << EOF > /etc/sysctl.d/99-zzz-network-tuning.conf
 # CatEacc/vps-linux-tuning (${TIER})
@@ -331,6 +340,7 @@ net.ipv4.tcp_adv_win_scale = 1
 -net.netfilter.nf_conntrack_udp_timeout_stream = 60
 fs.file-max = 2097152
 vm.swappiness = 10
+${FWD_LINE}
 EOF
 
     grep -vE '^\s*#|^\s*$' /etc/sysctl.d/99-zzz-network-tuning.conf | sed 's/^-//' | while IFS='=' read -r k v; do
@@ -346,7 +356,7 @@ EOF
 
     echo "[4/4] 配置 Fail2ban SSH 防爆破加固..."
     mkdir -p /run/sshd
-    SSH_PORTS=$( (sshd -T 2>/dev/null || true) | awk '$1=="port"{print $2}' | paste -sd, - )
+    SSH_PORTS=$( (sshd -T 2>/dev/null || true) | awk '$1=="port" && !seen[$2]++ {print $2}' | paste -sd, - )
     SSH_PORTS="${SSH_PORTS:-22}"
     BAN_ACTION_LINE=""
     if command -v nft >/dev/null 2>&1 && ! command -v iptables >/dev/null 2>&1; then
@@ -399,7 +409,7 @@ run_hyperv_fix() {
         echo "  [发现] dmesg 中检测到 GRO 合包异常告警 (suspect GRO implementation)"
     fi
 
-    read -rp "是否关闭默认网卡 (${DEFAULT_IFACE}) 的 GRO 并注册开机自启服务？[y/N]: " DO_GRO
+    read -rp "是否关闭默认网卡 (${DEFAULT_IFACE}) 的 GRO 并注册开机自启服务？[y/N]: " DO_GRO || DO_GRO="n"
     if [[ "${DO_GRO:-n}" =~ ^[Yy]$ ]]; then
         export DEBIAN_FRONTEND=noninteractive
         command -v ethtool >/dev/null 2>&1 || (apt-get update -y >/dev/null && apt-get install -y ethtool >/dev/null) || true
@@ -432,7 +442,7 @@ EOF
         echo ""
         echo "  [发现] 当前系统已加载 hv_balloon 动态内存气球驱动！"
         echo "  [提醒] 部分超售 Hyper-V 商家 TOS 可能不允许禁用气球驱动，操作前请先确认商家条款。"
-        read -rp "是否写入 modprobe + GRUB 黑名单以屏蔽 hv_balloon？[y/N]: " DO_BALLOON
+        read -rp "是否写入 modprobe + GRUB 黑名单以屏蔽 hv_balloon？[y/N]: " DO_BALLOON || DO_BALLOON="n"
         if [[ "${DO_BALLOON:-n}" =~ ^[Yy]$ ]]; then
             if ! command -v update-grub >/dev/null 2>&1 || [ ! -f /etc/default/grub ]; then
                 echo "  [提示] 当前系统未使用标准 GRUB（缺少 update-grub 或 /etc/default/grub），已跳过 GRUB 修改。"
@@ -480,7 +490,7 @@ EOF
 run_rollback() {
     echo ""
     printf "  ${YELLOW}即将撤销 vps-linux-tuning 写入的系统调优并恢复原厂快照。${R}\n"
-    read -rp "确认执行一键回滚还原？[y/N]: " DO_RB
+    read -rp "确认执行一键回滚还原？[y/N]: " DO_RB || DO_RB="n"
     if [[ ! "${DO_RB:-n}" =~ ^[Yy]$ ]]; then
         echo "  已取消回滚。"
         return 0
@@ -534,10 +544,12 @@ run_rollback() {
 
     echo "[4/4] 检查并还原网卡 GRO 与 Hyper-V GRUB 配置..."
     if [ -f /etc/systemd/system/nic-gro-off.service ]; then
+        SAVED_IFACE=$(awk '/^ExecStart=/ {for(i=1;i<=NF;i++) if($i=="-K"){print $(i+1); exit}}' /etc/systemd/system/nic-gro-off.service 2>/dev/null || true)
+        SAVED_IFACE="${SAVED_IFACE:-$DEFAULT_IFACE}"
         systemctl disable --now nic-gro-off.service >/dev/null 2>&1 || true
         rm -f /etc/systemd/system/nic-gro-off.service
         systemctl daemon-reload
-        command -v ethtool >/dev/null 2>&1 && ethtool -K "$DEFAULT_IFACE" gro on >/dev/null 2>&1 || true
+        command -v ethtool >/dev/null 2>&1 && ethtool -K "$SAVED_IFACE" gro on >/dev/null 2>&1 || true
     fi
     if [ -f /etc/modprobe.d/blacklist-hv_balloon.conf ] || [ -f /etc/default/grub.d/99-zz-hv-balloon.cfg ]; then
         rm -f /etc/modprobe.d/blacklist-hv_balloon.conf /etc/default/grub.d/99-zz-hv-balloon.cfg
