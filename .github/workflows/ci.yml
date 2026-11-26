@@ -23,3 +23,8 @@ jobs:
         run: |
           shellcheck -S error tune.sh
           echo "ShellCheck error-level audit OK"
+
+      - name: Read-only audit mode smoke test
+        run: |
+          sudo bash tune.sh 3
+          echo "Read-only audit smoke test OK"
