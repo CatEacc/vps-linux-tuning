@@ -3,9 +3,9 @@
 # Linux VPS 底层内核与内存调优一键脚本 (CatEacc/vps-linux-tuning)
 # 适用系统: Debian 11/12/13, Ubuntu 20.04/22.04/24.04 (AMD64 / ARM64)
 # 功能菜单:
-#   1) 一键全套底层调优 (改前自动存原厂快照 + 分档缓冲 + 99-zzz + BBR/FQ + 1G Swap + Journald 50M + Fail2ban)
+#   1) 一键全套底层调优 (改前自动存原厂快照 + 分档缓冲 + 99-zzz + BBR/FQ + 1G Swap + 默认封 TCP 25 + Journald 50M + Fail2ban)
 #   2) Hyper-V 虚拟化专项排查与加固 (检测 hv_balloon 动态内存回收 / 持久化关闭网卡 GRO)
-#   3) 只读系统体检 (查看当前内存、Swap、BBR、缓冲区档位、Journald 与虚拟化状态)
+#   3) 只读系统体检 (查看当前内存、Swap、BBR、缓冲区档位、TCP 25 防护、Journald 与虚拟化状态)
 #   4) 一键回滚还原 (恢复脚本修改前的原厂内核参数、日志、Swap 与虚拟化配置)
 # ==============================================================================
 
@@ -21,12 +21,14 @@ fi
 OS_INFO=$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-Linux}" || uname -s)
 KERNEL_INFO=$(uname -r | cut -d'-' -f1)
 ARCH_INFO=$(uname -m)
-MEM_SHOW=$(free -m | awk '/Mem:/ {print $2}')
-SWAP_SHOW=$(free -m | awk '/Swap:/ {print $2}')
+MEM_SHOW=$(LC_ALL=C free -m 2>/dev/null | awk '/^Mem:/ {print $2}')
+MEM_SHOW="${MEM_SHOW:-0}"
+SWAP_SHOW=$(LC_ALL=C free -m 2>/dev/null | awk '/^Swap:/ {print $2}')
+SWAP_SHOW="${SWAP_SHOW:-0}"
 BBR_STAT=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-MPTCP_STAT=$(sysctl -n net.mptcp.enabled 2>/dev/null || echo "0")
 VIRT_STAT=$(systemd-detect-virt 2>/dev/null || echo "unknown")
-DEFAULT_IFACE=$(ip route show default 2>/dev/null | awk '{print $5; exit}' || echo "eth0")
+DEFAULT_IFACE=$( (ip -4 route show default 2>/dev/null; ip -6 route show default 2>/dev/null) | awk '{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}' || true )
+DEFAULT_IFACE="${DEFAULT_IFACE:-eth0}"
 
 # 256 色丝滑渐变配色
 ESC="$(printf '\033')"
@@ -81,7 +83,7 @@ if [ -z "$MODE" ]; then
     printf '\n'
     print_cateacc_logo
     printf '\n'
-    printf "  ${CYAN}猫e/acc (CatEacc)${R} ${DIM}· Linux VPS 底层内核与内存调优脚本 ${YELLOW}v1.1.0${R}\n"
+    printf "  ${CYAN}猫e/acc (CatEacc)${R} ${DIM}· Linux VPS 底层内核与内存调优脚本 ${YELLOW}v1.1.1${R}\n"
     printf "  ${GREEN}──────────────────────────────────────────────────────────${R}\n"
     printf "  ${SKY}OS:${R}       ${GREEN}${OS_INFO} (${ARCH_INFO})${R}\n"
     printf "  ${SKY}Kernel:${R}   ${GREEN}${KERNEL_INFO}${R}  ${DIM}|${R}  ${SKY}Virt:${R} ${GREEN}${VIRT_STAT}${R}  ${DIM}|${R}  ${SKY}NIC:${R} ${CYAN}${DEFAULT_IFACE}${R}\n"
@@ -91,11 +93,11 @@ if [ -z "$MODE" ]; then
     printf "  ${GREEN}──────────────────────────────────────────────────────────${R}\n\n"
     printf "  ${WHITE}请选择操作模式：${R}\n"
     printf "  ${GREEN}[1]${R} ${WHITE}一键全套底层调优${R} ${CYAN}★ 推荐 · 改前自动快照${R}\n"
-    printf "      ${DIM}按物理内存分档缓冲 + 99-zzz 防覆盖 + BBR/FQ + 1G Swap + Journald 50M + Fail2ban${R}\n"
+    printf "      ${DIM}分档缓冲 + 99-zzz 防覆盖 + BBR/FQ + 1G Swap + 默认封 TCP 25 + Journald 50M + Fail2ban${R}\n"
     printf "  ${GREEN}[2]${R} ${WHITE}Hyper-V 虚拟化专项排查与加固${R} ${YELLOW}· hv_balloon / GRO${R}\n"
     printf "      ${DIM}检测动态内存回收（确认后写 GRUB 黑名单）+ 持久化关闭网卡 GRO 合包${R}\n"
     printf "  ${GREEN}[3]${R} ${WHITE}只读系统体检${R} ${PINK}· 零修改${R}\n"
-    printf "      ${DIM}输出当前内存、Swap、BBR、缓冲区上限、Journald 占用与 Hyper-V 驱动状态${R}\n"
+    printf "      ${DIM}输出当前内存、Swap、BBR、缓冲区上限、TCP 25 防护、Journald 与 Hyper-V 状态${R}\n"
     printf "  ${GREEN}[4]${R} ${WHITE}一键回滚还原${R} ${ORANGE}· 恢复原厂快照${R}\n"
     printf "      ${DIM}撤销本脚本写入的 sysctl / Journald / Fail2ban / Swap / GRO 与 GRUB 修改${R}\n\n"
     read -rp "$(printf "${YELLOW}  请输入模式编号 [1-4] (回车默认 1): ${R}")" MODE
@@ -117,6 +119,11 @@ run_audit() {
     echo "  rmem_max / default  : $(sysctl -n net.core.rmem_max 2>/dev/null || echo N/A) / $(sysctl -n net.core.rmem_default 2>/dev/null || echo N/A)"
     echo "  tcp_rmem            : $(sysctl -n net.ipv4.tcp_rmem 2>/dev/null || echo N/A)"
     echo "  Journald 磁盘占用   : $(journalctl --disk-usage 2>/dev/null | sed 's/Archived and active journals take up //; s/ in the file system\.//' || echo N/A)"
+    if command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -Eq 'dport 25[[:space:]].*(reject|drop)'; then
+        echo "  出站 TCP 25 防护    : 已封禁 (nftables)"
+    else
+        echo "  出站 TCP 25 防护    : 未检测到封禁规则（可运行模式 1 自动加固）"
+    fi
     if lsmod 2>/dev/null | grep -q "^hv_balloon"; then
         echo "  Hyper-V hv_balloon  : [已加载] 宿主机可动态回收空闲内存"
     else
@@ -176,28 +183,75 @@ save_snapshot() {
 run_full_tune() {
     echo ""
     save_snapshot
-    echo "[1/4] 安装基础运维组件 (chrony / fail2ban / ethtool)..."
+    echo "[1/4] 安装基础运维组件 (chrony / nftables / fail2ban / ethtool)..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y curl chrony fail2ban python3-systemd ethtool >/dev/null 2>&1 || \
-      apt-get install -y curl chrony fail2ban ethtool
+    apt-get install -y curl chrony nftables fail2ban python3-systemd ethtool >/dev/null 2>&1 || \
+      apt-get install -y curl chrony nftables fail2ban ethtool
 
-    echo "[2/4] 配置 NTP 对时、1GB Swap 兜底与 Journald 50M 限额..."
+    echo "[2/4] 配置 NTP 对时、1GB Swap 兜底、默认封禁出站 TCP 25 与 Journald 50M 限额..."
     systemctl enable --now chrony 2>/dev/null || true
     chronyc makestep >/dev/null 2>&1 || true
 
     if [ ! -f /swapfile ]; then
-        fallocate -l 1G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
-        chmod 600 /swapfile
-        mkswap /swapfile >/dev/null
-        swapon /swapfile || true
-        touch "${BACKUP_DIR}/swap_created_by_script"
+        if fallocate -l 1G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none; then
+            chmod 600 /swapfile
+            mkswap /swapfile >/dev/null 2>&1 || true
+            if swapon /swapfile 2>/dev/null; then
+                touch "${BACKUP_DIR}/swap_created_by_script"
+            else
+                rm -f /swapfile
+                dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none 2>/dev/null || true
+                chmod 600 /swapfile
+                mkswap /swapfile >/dev/null 2>&1 || true
+                if swapon /swapfile 2>/dev/null; then
+                    touch "${BACKUP_DIR}/swap_created_by_script"
+                else
+                    rm -f /swapfile
+                    echo "  [提示] 当前容器/文件系统不支持挂载 Swap，已自动跳过。"
+                fi
+            fi
+        fi
     fi
-    grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw 0 0" >> /etc/fstab
-    if [ -f /swap.img ] && [ "$(stat -c%s /swap.img 2>/dev/null || echo 1073741824)" -lt 943718400 ]; then
-        swapoff /swap.img 2>/dev/null || true
-        sed -i '\|/swap\.img|d' /etc/fstab
-        rm -f /swap.img
+    if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "/swapfile"; then
+        grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw,nofail 0 0" >> /etc/fstab
+        if [ -f /swap.img ] && [ "$(stat -c%s /swap.img 2>/dev/null || echo 1073741824)" -lt 943718400 ]; then
+            swapoff /swap.img 2>/dev/null || true
+            sed -i '\|/swap\.img|d' /etc/fstab
+            rm -f /swap.img
+        fi
+    fi
+
+    if command -v nft >/dev/null 2>&1; then
+        mkdir -p /etc/nftables.d
+        [ ! -f /etc/nftables.d/smtp-guard.nft ] && touch "${BACKUP_DIR}/smtp_guard_created_by_script"
+        cat << 'EOF' > /etc/nftables.d/smtp-guard.nft
+table inet smtp_guard
+delete table inet smtp_guard
+table inet smtp_guard {
+    chain output {
+        type filter hook output priority filter; policy accept;
+        tcp dport 25 reject with tcp reset
+    }
+}
+EOF
+        nft -f /etc/nftables.d/smtp-guard.nft 2>/dev/null || true
+        cat << 'EOF' > /etc/systemd/system/smtp-guard.service
+[Unit]
+Description=Block Outbound TCP 25 (SMTP Anti-Spam)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/nftables.d/smtp-guard.nft
+ExecStop=/usr/sbin/nft delete table inet smtp_guard
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload && systemctl enable smtp-guard.service >/dev/null 2>&1 || true
     fi
 
     cat << 'EOF' > /etc/systemd/journald.conf
@@ -218,7 +272,7 @@ EOF
     modprobe tcp_bbr 2>/dev/null || true
     modprobe nf_conntrack 2>/dev/null || true
 
-    MEM_MB=$(free -m | awk '/Mem:/ {print $2}')
+    MEM_MB=$(LC_ALL=C free -m 2>/dev/null | awk '/^Mem:/ {print $2}')
     if [ "${MEM_MB:-1000}" -le 700 ]; then
         TIER="512M 档 (防 OOM 紧凑缓冲)"
         RMEM_MAX=16777216; TCP_MAX=8388608; DEF_BUF=262144; CONN_MAX=65536
@@ -279,8 +333,13 @@ root hard nofile 1048576
 EOF
 
     echo "[4/4] 配置 Fail2ban SSH 防爆破加固..."
-    SSH_PORTS=$(sshd -T 2>/dev/null | awk '$1=="port"{print $2}' | paste -sd, - || true)
-    SSH_PORTS=${SSH_PORTS:-22}
+    mkdir -p /run/sshd
+    SSH_PORTS=$( (sshd -T 2>/dev/null || true) | awk '$1=="port"{print $2}' | paste -sd, - )
+    SSH_PORTS="${SSH_PORTS:-22}"
+    BAN_ACTION_LINE=""
+    if command -v nft >/dev/null 2>&1 && ! command -v iptables >/dev/null 2>&1; then
+        BAN_ACTION_LINE="banaction = nftables-multiport"
+    fi
     cat << EOF > /etc/fail2ban/jail.local
 [DEFAULT]
 bantime = 86400
@@ -290,6 +349,7 @@ bantime.maxtime = 2592000
 findtime = 600
 maxretry = 3
 backend = systemd
+${BAN_ACTION_LINE}
 
 [sshd]
 enabled = true
@@ -304,7 +364,8 @@ EOF
     printf "  ${WHITE}底层调优全部完成！${R}\n"
     echo "  已套用档位 : ${TIER}"
     echo "  拥塞控制   : $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo N/A) + $(sysctl -n net.core.default_qdisc 2>/dev/null || echo N/A)"
-    echo "  Swap 总量  : $(free -m | awk '/Swap:/ {print $2}') MB (swappiness=10)"
+    echo "  Swap 总量  : $(LC_ALL=C free -m | awk '/^Swap:/ {print $2}') MB (swappiness=10)"
+    echo "  出站 TCP 25: 已封禁 (smtp-guard.service)"
     echo "  持久化文件 : /etc/sysctl.d/99-zzz-network-tuning.conf"
     printf "  ${GREEN}──────────────────────────────────────────────────────────${R}\n"
 }
@@ -353,20 +414,28 @@ EOF
         echo "  [提醒] 部分超售 Hyper-V 商家 TOS 可能不允许禁用气球驱动，操作前请先确认商家条款。"
         read -rp "是否写入 modprobe + GRUB 黑名单以屏蔽 hv_balloon？[y/N]: " DO_BALLOON
         if [[ "${DO_BALLOON:-n}" =~ ^[Yy]$ ]]; then
-            cp -a /etc/default/grub /root/grub.default.bak
+            mkdir -p "$BACKUP_DIR" /etc/default/grub.d
+            [ -f "${BACKUP_DIR}/grub.default.bak" ] || cp -a /etc/default/grub "${BACKUP_DIR}/grub.default.bak"
             printf "blacklist hv_balloon\n" > /etc/modprobe.d/blacklist-hv_balloon.conf
-            grep -q "modprobe.blacklist=hv_balloon" /etc/default/grub || \
-              sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 modprobe.blacklist=hv_balloon"/' /etc/default/grub
-            update-initramfs -u
-            update-grub
-            ROOT_UUID=$(findmnt -no UUID / || true)
-            if [ -n "$ROOT_UUID" ] && grep -q "$ROOT_UUID" /boot/grub/grub.cfg && grep -q "modprobe.blacklist=hv_balloon" /boot/grub/grub.cfg; then
-                echo "  [校验通过] GRUB 根分区 UUID 完整，已备份原配置至 /root/grub.default.bak。"
+            cat << 'EOF' > /etc/default/grub.d/99-zz-hv-balloon.cfg
+GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:+$GRUB_CMDLINE_LINUX }modprobe.blacklist=hv_balloon"
+EOF
+            GRUB_OK="0"
+            if update-initramfs -u && update-grub; then
+                ROOT_UUID=$(findmnt -no UUID / || true)
+                if [ -n "$ROOT_UUID" ] && grep -q "$ROOT_UUID" /boot/grub/grub.cfg 2>/dev/null && grep -q "modprobe.blacklist=hv_balloon" /boot/grub/grub.cfg 2>/dev/null; then
+                    GRUB_OK="1"
+                fi
+            fi
+            if [ "$GRUB_OK" = "1" ]; then
+                echo "  [校验通过] GRUB 根分区 UUID 完整，已备份原配置至 ${BACKUP_DIR}/grub.default.bak。"
                 echo "  闲时执行 systemctl reboot 即可生效并恢复完整初始内存。"
             else
-                echo "  [警告] GRUB 校验未通过！已自动回滚 /etc/default/grub，请勿强行重启。"
-                cp -a /root/grub.default.bak /etc/default/grub
-                update-grub || true
+                echo "  [警告] GRUB 校验未通过！已自动完整回滚 modprobe 与 GRUB 配置，请勿强行重启。"
+                rm -f /etc/modprobe.d/blacklist-hv_balloon.conf /etc/default/grub.d/99-zz-hv-balloon.cfg
+                [ -f "${BACKUP_DIR}/grub.default.bak" ] && cp -a "${BACKUP_DIR}/grub.default.bak" /etc/default/grub
+                update-initramfs -u >/dev/null 2>&1 || true
+                update-grub >/dev/null 2>&1 || true
             fi
         fi
     else
@@ -395,9 +464,12 @@ run_rollback() {
     fi
     sysctl --system >/dev/null 2>&1 || true
 
-    echo "[2/4] 恢复 Journald、nofile 与 Fail2ban 配置..."
+    echo "[2/4] 恢复 Journald、nofile、Fail2ban 与本脚本创建的防火墙规则..."
     if [ -f "${BACKUP_DIR}/journald.conf.bak" ]; then
         cp -a "${BACKUP_DIR}/journald.conf.bak" /etc/systemd/journald.conf
+        systemctl restart systemd-journald 2>/dev/null || true
+    elif [ -f /etc/systemd/journald.conf ] && [ -f "${BACKUP_DIR}/snapshot.done" ]; then
+        rm -f /etc/systemd/journald.conf
         systemctl restart systemd-journald 2>/dev/null || true
     fi
     if [ -f "${BACKUP_DIR}/99-nofile.conf.bak" ]; then
@@ -411,6 +483,12 @@ run_rollback() {
     elif [ -f /etc/fail2ban/jail.local ] && [ -f "${BACKUP_DIR}/snapshot.done" ]; then
         rm -f /etc/fail2ban/jail.local
         systemctl restart fail2ban 2>/dev/null || true
+    fi
+    if [ -f "${BACKUP_DIR}/smtp_guard_created_by_script" ]; then
+        systemctl disable --now smtp-guard.service >/dev/null 2>&1 || true
+        nft delete table inet smtp_guard >/dev/null 2>&1 || true
+        rm -f /etc/systemd/system/smtp-guard.service /etc/nftables.d/smtp-guard.nft "${BACKUP_DIR}/smtp_guard_created_by_script"
+        systemctl daemon-reload >/dev/null 2>&1 || true
     fi
 
     echo "[3/4] 检查并清理本脚本新建的 Swap..."
@@ -427,9 +505,13 @@ run_rollback() {
         systemctl daemon-reload
         command -v ethtool >/dev/null 2>&1 && ethtool -K "$DEFAULT_IFACE" gro on >/dev/null 2>&1 || true
     fi
-    if [ -f /etc/modprobe.d/blacklist-hv_balloon.conf ] && [ -f /root/grub.default.bak ]; then
-        rm -f /etc/modprobe.d/blacklist-hv_balloon.conf
-        cp -a /root/grub.default.bak /etc/default/grub
+    if [ -f /etc/modprobe.d/blacklist-hv_balloon.conf ] || [ -f /etc/default/grub.d/99-zz-hv-balloon.cfg ]; then
+        rm -f /etc/modprobe.d/blacklist-hv_balloon.conf /etc/default/grub.d/99-zz-hv-balloon.cfg
+        if [ -f "${BACKUP_DIR}/grub.default.bak" ]; then
+            cp -a "${BACKUP_DIR}/grub.default.bak" /etc/default/grub
+        elif [ -f /root/grub.default.bak ]; then
+            cp -a /root/grub.default.bak /etc/default/grub
+        fi
         update-initramfs -u >/dev/null 2>&1 || true
         update-grub >/dev/null 2>&1 || true
         echo "  [提示] 已还原 Hyper-V GRUB 配置，重启后恢复原厂 hv_balloon 状态。"

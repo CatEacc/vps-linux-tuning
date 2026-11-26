@@ -16,9 +16,11 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/main/tune.sh)
 ```
 
+![CatEacc vps-linux-tuning 终端菜单](https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/main/tune_menu.png)
+
 ---
 
-## 核心解决的 5 个运维痛点
+## 核心解决的 6 个运维痛点
 
 1. **512M / 1G 小内存防 OOM（按内存分档网络缓冲）**：
    - 不再无脑套用 64MB 缓冲区导致小内存机器并发高时触发 OOM Killer。
@@ -33,6 +35,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/mai
    - *注：部分超售 Hyper-V 商家 TOS 可能不允许禁用动态内存驱动，动手前请先确认商家条款。*
 5. **Hyper-V 虚拟网卡 `GRO` 合包异常修复**：
    - 自动识别默认路由网卡名（兼容 `eth0` / `ens3` / `enp0s3` 等），通过 `ethtool -K <IFACE> gro off` 关闭并注册为 `nic-gro-off.service` 开机自启。
+6. **主机级默认封禁出站 `TCP 25`（防恶意发信拖黑 IP）**：
+   - 使用独立 `nftables` 表（`table inet smtp_guard`）与 `smtp-guard.service` 开机持久化拒绝出站 `TCP 25`（不影响 `465`/`587`/`993` 正常加密收发信，且不影响已有防火墙表）。
 
 ---
 
