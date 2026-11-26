@@ -1,5 +1,6 @@
 # Linux VPS 底层内核与内存调优指南（`vps-linux-tuning`）
 
+[![CI Check](https://github.com/CatEacc/vps-linux-tuning/actions/workflows/ci.yml/badge.svg)](https://github.com/CatEacc/vps-linux-tuning/actions/workflows/ci.yml)
 [![Linux](https://img.shields.io/badge/Linux-Debian%20%7C%20Ubuntu-blue?logo=linux&logoColor=white)](#)
 [![Kernel](https://img.shields.io/badge/Kernel-BBR%20%2B%20FQ-green)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -31,7 +32,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/CatEacc/vps-linux-tuning/mai
 3. **`systemd-journald` 日志与内存映射收敛**：
    - 同时锁定 `SystemMaxUse=50M`、`SystemMaxFileSize=10M`、`RuntimeMaxUse=20M`，防止小硬盘被日志写满并压低常驻 RSS。
 4. **Hyper-V `hv_balloon` 动态内存回收（Memory Ballooning）排查与防护**：
-   - 自动检测 `hv_balloon` 模块；在用户二次确认后自动备份 `/etc/default/grub`、写入 `modprobe` + GRUB 黑名单，并在 `update-grub` 后强校验根分区 UUID（校验失败自动回滚）。
+   - 自动检测 `hv_balloon` 模块；在用户二次确认后自动备份 `/etc/default/grub`、写入 `modprobe` + GRUB 黑名单，并在 `update-grub` 后强校验根分区引导项（UUID / LVM 设备路径，校验失败自动回滚）。
    - *注：部分超售 Hyper-V 商家 TOS 可能不允许禁用动态内存驱动，动手前请先确认商家条款。*
 5. **Hyper-V 虚拟网卡 `GRO` 合包异常修复**：
    - 自动识别默认路由网卡名（兼容 `eth0` / `ens3` / `enp0s3` 等），通过 `ethtool -K <IFACE> gro off` 关闭并注册为 `nic-gro-off.service` 开机自启。
