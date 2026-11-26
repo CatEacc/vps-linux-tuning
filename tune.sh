@@ -10,6 +10,7 @@
 # ==============================================================================
 
 set -euo pipefail
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 
 BACKUP_DIR="/var/backups/vps-linux-tuning"
 
@@ -120,8 +121,8 @@ run_audit() {
     echo "  tcp_rmem            : $(sysctl -n net.ipv4.tcp_rmem 2>/dev/null || echo N/A)"
     echo "  Journald 磁盘占用   : $(journalctl --disk-usage 2>/dev/null | sed 's/Archived and active journals take up //; s/ in the file system\.//' || echo N/A)"
     if command -v nft >/dev/null 2>&1 && (
-        nft list table inet smtp_guard 2>/dev/null | grep -Eq 'dport 25[[:space:]].*(reject|drop)' ||
-        nft list ruleset 2>/dev/null | awk '/hook output/{f=1} /^\t\}/{f=0} f && /dport 25.*(reject|drop)/{ok=1} END{exit !ok}'
+        nft list table inet smtp_guard 2>/dev/null | grep -Eq 'tcp dport 25([^0-9]|$).*(reject|drop)' ||
+        nft list ruleset 2>/dev/null | awk '/hook output/{f=1} /^[[:space:]]*\}/{f=0} f && /tcp dport (25([^0-9]|$)|\{[^}]*(^|[^0-9])25([^0-9]|$)[^}]*\})/ && /(reject|drop)/{ok=1} END{exit !ok}'
     ); then
         echo "  出站 TCP 25 防护    : 已封禁 (nftables output)"
     else
@@ -157,6 +158,7 @@ save_snapshot() {
         [ -f /etc/systemd/journald.conf ] && cp -a /etc/systemd/journald.conf "${BACKUP_DIR}/journald.conf.bak"
         [ -f /etc/fail2ban/jail.local ] && cp -a /etc/fail2ban/jail.local "${BACKUP_DIR}/jail.local.bak"
         [ -f /etc/security/limits.d/99-nofile.conf ] && cp -a /etc/security/limits.d/99-nofile.conf "${BACKUP_DIR}/99-nofile.conf.bak"
+        [ -f /etc/sysctl.d/99-zzz-proxy-tuning.conf ] && cp -a /etc/sysctl.d/99-zzz-proxy-tuning.conf "${BACKUP_DIR}/99-zzz-proxy-tuning.conf.bak"
         : > "${BACKUP_DIR}/sysctl_orig.conf"
         for key in \
             net.core.default_qdisc net.ipv4.tcp_congestion_control net.mptcp.enabled \
@@ -196,7 +198,8 @@ run_full_tune() {
     systemctl enable --now chrony 2>/dev/null || true
     chronyc makestep >/dev/null 2>&1 || true
 
-    if [ ! -f /swapfile ]; then
+    CURR_SWAP=$(LC_ALL=C free -m 2>/dev/null | awk '/^Swap:/ {print $2}')
+    if [ ! -f /swapfile ] && [ "${CURR_SWAP:-0}" -lt 900 ]; then
         if fallocate -l 1G /swapfile 2>/dev/null || dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none; then
             chmod 600 /swapfile
             mkswap /swapfile >/dev/null 2>&1 || true
@@ -217,15 +220,11 @@ run_full_tune() {
         fi
     fi
     if swapon --show=NAME --noheadings 2>/dev/null | grep -qx "/swapfile"; then
-        grep -q "/swapfile" /etc/fstab || echo "/swapfile none swap sw,nofail 0 0" >> /etc/fstab
-        if [ -f /swap.img ] && [ "$(stat -c%s /swap.img 2>/dev/null || echo 1073741824)" -lt 943718400 ]; then
-            swapoff /swap.img 2>/dev/null || true
-            sed -i '\|/swap\.img|d' /etc/fstab
-            rm -f /swap.img
-        fi
+        grep -Eq '^[[:space:]]*/swapfile([[:space:]]|$)' /etc/fstab || echo "/swapfile none swap sw,nofail 0 0" >> /etc/fstab
     fi
 
     if command -v nft >/dev/null 2>&1; then
+        NFT_BIN=$(command -v nft)
         mkdir -p /etc/nftables.d
         [ ! -f /etc/nftables.d/smtp-guard.nft ] && touch "${BACKUP_DIR}/smtp_guard_created_by_script"
         cat << 'EOF' > /etc/nftables.d/smtp-guard.nft
@@ -238,8 +237,8 @@ table inet smtp_guard {
     }
 }
 EOF
-        nft -f /etc/nftables.d/smtp-guard.nft 2>/dev/null || true
-        cat << 'EOF' > /etc/systemd/system/smtp-guard.service
+        "$NFT_BIN" -f /etc/nftables.d/smtp-guard.nft 2>/dev/null || true
+        cat << EOF > /etc/systemd/system/smtp-guard.service
 [Unit]
 Description=Block Outbound TCP 25 (SMTP Anti-Spam)
 After=network-online.target
@@ -248,8 +247,8 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/sbin/nft -f /etc/nftables.d/smtp-guard.nft
-ExecStop=/usr/sbin/nft delete table inet smtp_guard
+ExecStart=${NFT_BIN} -f /etc/nftables.d/smtp-guard.nft
+ExecStop=${NFT_BIN} delete table inet smtp_guard
 
 [Install]
 WantedBy=multi-user.target
@@ -257,13 +256,21 @@ EOF
         systemctl daemon-reload && systemctl enable --now smtp-guard.service >/dev/null 2>&1 || true
     fi
 
-    cat << 'EOF' > /etc/systemd/journald.conf
+    if python3 -c "from systemd import journal" >/dev/null 2>&1; then
+        F2B_BACKEND="systemd"
+        FWD_SYSLOG="no"
+    else
+        F2B_BACKEND="auto"
+        FWD_SYSLOG="yes"
+    fi
+
+    cat << EOF > /etc/systemd/journald.conf
 [Journal]
 SystemMaxUse=50M
 SystemMaxFileSize=10M
 RuntimeMaxUse=20M
 MaxRetentionSec=7day
-ForwardToSyslog=no
+ForwardToSyslog=${FWD_SYSLOG}
 EOF
     systemctl restart systemd-journald 2>/dev/null || true
     journalctl --rotate 2>/dev/null || true
@@ -287,6 +294,8 @@ EOF
         RMEM_MAX=67108864; TCP_MAX=33554432; DEF_BUF=1048576; CONN_MAX=131072
     fi
 
+    # 避免代理脚本遗留的 99-zzz-proxy-tuning.conf（字典序 p > n）在重启后覆盖本脚本分档参数
+    rm -f /etc/sysctl.d/99-zzz-proxy-tuning.conf
     cat << EOF > /etc/sysctl.d/99-zzz-network-tuning.conf
 # CatEacc/vps-linux-tuning (${TIER})
 net.core.default_qdisc = fq
@@ -351,7 +360,7 @@ bantime.factor = 2
 bantime.maxtime = 2592000
 findtime = 600
 maxretry = 3
-backend = systemd
+backend = ${F2B_BACKEND}
 ${BAN_ACTION_LINE}
 
 [sshd]
@@ -368,7 +377,7 @@ EOF
     echo "  已套用档位 : ${TIER}"
     echo "  拥塞控制   : $(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo N/A) + $(sysctl -n net.core.default_qdisc 2>/dev/null || echo N/A)"
     echo "  Swap 总量  : $(LC_ALL=C free -m | awk '/^Swap:/ {print $2}') MB (swappiness=10)"
-    if command -v nft >/dev/null 2>&1 && nft list table inet smtp_guard 2>/dev/null | grep -Eq 'dport 25[[:space:]].*(reject|drop)'; then
+    if command -v nft >/dev/null 2>&1 && nft list table inet smtp_guard 2>/dev/null | grep -Eq 'tcp dport 25([^0-9]|$).*(reject|drop)'; then
         echo "  出站 TCP 25: 已封禁 (smtp-guard.service)"
     else
         echo "  出站 TCP 25: 未生效（当前环境可能不支持 nftables）"
@@ -393,10 +402,13 @@ run_hyperv_fix() {
     read -rp "是否关闭默认网卡 (${DEFAULT_IFACE}) 的 GRO 并注册开机自启服务？[y/N]: " DO_GRO
     if [[ "${DO_GRO:-n}" =~ ^[Yy]$ ]]; then
         export DEBIAN_FRONTEND=noninteractive
-        command -v ethtool >/dev/null 2>&1 || (apt-get update -y >/dev/null && apt-get install -y ethtool >/dev/null)
-        ETHTOOL_BIN=$(command -v ethtool)
-        "$ETHTOOL_BIN" -K "$DEFAULT_IFACE" gro off || true
-        cat << EOF > /etc/systemd/system/nic-gro-off.service
+        command -v ethtool >/dev/null 2>&1 || (apt-get update -y >/dev/null && apt-get install -y ethtool >/dev/null) || true
+        ETHTOOL_BIN=$(command -v ethtool || true)
+        if [ -z "$ETHTOOL_BIN" ]; then
+            echo "  [警告] 未能安装或找到 ethtool，已跳过 GRO 关闭。"
+        else
+            "$ETHTOOL_BIN" -K "$DEFAULT_IFACE" gro off || true
+            cat << EOF > /etc/systemd/system/nic-gro-off.service
 [Unit]
 Description=Disable GRO on ${DEFAULT_IFACE}
 After=network-online.target
@@ -410,9 +422,10 @@ ExecStart=-${ETHTOOL_BIN} -K ${DEFAULT_IFACE} gro off
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
-        systemctl enable --now nic-gro-off.service >/dev/null 2>&1 || true
-        echo "  [完成] 已关闭 ${DEFAULT_IFACE} GRO 并持久化为 nic-gro-off.service"
+            systemctl daemon-reload
+            systemctl enable --now nic-gro-off.service >/dev/null 2>&1 || true
+            echo "  [完成] 已关闭 ${DEFAULT_IFACE} GRO 并持久化为 nic-gro-off.service"
+        fi
     fi
 
     if lsmod 2>/dev/null | grep -q "^hv_balloon"; then
@@ -475,6 +488,9 @@ run_rollback() {
 
     echo "[1/4] 移除 99-zzz 内核配置文件并恢复原厂 sysctl 运行态参数..."
     rm -f /etc/sysctl.d/99-zzz-network-tuning.conf /etc/modules-load.d/99-network-tuning.conf
+    if [ -f "${BACKUP_DIR}/99-zzz-proxy-tuning.conf.bak" ]; then
+        cp -a "${BACKUP_DIR}/99-zzz-proxy-tuning.conf.bak" /etc/sysctl.d/99-zzz-proxy-tuning.conf
+    fi
     if [ -f "${BACKUP_DIR}/sysctl_orig.conf" ]; then
         while IFS='=' read -r k v; do
             [ -n "${k:-}" ] && sysctl -w "$(echo "$k" | xargs)=$(echo "$v" | xargs)" >/dev/null 2>&1 || true
@@ -525,10 +541,12 @@ run_rollback() {
     fi
     if [ -f /etc/modprobe.d/blacklist-hv_balloon.conf ] || [ -f /etc/default/grub.d/99-zz-hv-balloon.cfg ]; then
         rm -f /etc/modprobe.d/blacklist-hv_balloon.conf /etc/default/grub.d/99-zz-hv-balloon.cfg
-        if [ -f "${BACKUP_DIR}/grub.default.bak" ]; then
-            cp -a "${BACKUP_DIR}/grub.default.bak" /etc/default/grub
-        elif [ -f /root/grub.default.bak ]; then
-            cp -a /root/grub.default.bak /etc/default/grub
+        if grep -q "hv_balloon" /etc/default/grub 2>/dev/null; then
+            if [ -f "${BACKUP_DIR}/grub.default.bak" ]; then
+                cp -a "${BACKUP_DIR}/grub.default.bak" /etc/default/grub
+            elif [ -f /root/grub.default.bak ]; then
+                cp -a /root/grub.default.bak /etc/default/grub
+            fi
         fi
         update-initramfs -u >/dev/null 2>&1 || true
         update-grub >/dev/null 2>&1 || true
