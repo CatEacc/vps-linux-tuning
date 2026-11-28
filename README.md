@@ -1,13 +1,31 @@
-# Linux VPS 底层内核与内存调优指南（`vps-linux-tuning`）
+<div align="center">
 
+<img src="tuning_banner.svg" alt="CatEacc vps-linux-tuning Banner" width="100%" />
+
+<br />
+
+[![Release](https://img.shields.io/github/v/release/CatEacc/vps-linux-tuning?style=flat-square&color=f97316&label=Release)](https://github.com/CatEacc/vps-linux-tuning/releases)
+[![Stars](https://img.shields.io/github/stars/CatEacc/vps-linux-tuning?style=flat-square&color=22c55e&label=Stars)](https://github.com/CatEacc/vps-linux-tuning/stargazers)
+[![Linux](https://img.shields.io/badge/Linux-Debian%20%7C%20Ubuntu-3b82f6?style=flat-square&logo=linux&logoColor=white)](#)
+[![Kernel](https://img.shields.io/badge/Kernel-BBR%20%2B%20FQ-22c55e?style=flat-square)](#)
 [![CI Check](https://github.com/CatEacc/vps-linux-tuning/actions/workflows/ci.yml/badge.svg)](https://github.com/CatEacc/vps-linux-tuning/actions/workflows/ci.yml)
-[![Linux](https://img.shields.io/badge/Linux-Debian%20%7C%20Ubuntu-blue?logo=linux&logoColor=white)](#)
-[![Kernel](https://img.shields.io/badge/Kernel-BBR%20%2B%20FQ-green)](#)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Telegram](https://img.shields.io/badge/Telegram-%E7%8C%ABe%2Facc-26A5E4?logo=telegram)](https://t.me/CatCryptoMaster)
+[![License: MIT](https://img.shields.io/badge/License-MIT-f59e0b?style=flat-square)](LICENSE)
+[![Telegram](https://img.shields.io/badge/Telegram-%E7%8C%ABe%2Facc-26A5E4?style=flat-square&logo=telegram&logoColor=white)](https://t.me/CatCryptoMaster)
 
-> **仓库地址**：`github.com/CatEacc/vps-linux-tuning`  
-> **适用系统**：Debian 11 / 12 / 13、Ubuntu 20.04 / 22.04 / 24.04（AMD64 / ARM64），纯开源 Shell 文本无闭源二进制，方便直接审计。
+<p>
+  <a href="#一键执行4-种模式--改前自动快照支持一键回滚"><b>一键调优</b></a> ·
+  <a href="#核心解决的-6-个运维痛点"><b>6 大痛点</b></a> ·
+  <a href="#参数分档对照表"><b>内存分档表</b></a> ·
+  <a href="https://github.com/CatEacc/vps-xray-runbook">Xray 套件</a> ·
+  <a href="https://github.com/CatEacc/vps-singbox-runbook">sing-box 套件</a> ·
+  <a href="https://github.com/CatEacc/vps-clash-runbook">Clash 客户端</a>
+</p>
+
+<sub><b>纯 Linux VPS 底层内核与内存调优脚本</b> — 512M/1G 小内存分档防 OOM · <code>99-zzz</code> 防重启覆盖 · Hyper-V <code>hv_balloon</code> 与 GRO 修复 · 主机级 <code>nftables</code> 封禁出站 TCP 25 · 改前自动快照一键回滚</sub>
+
+</div>
+
+> - **适用系统**：Debian 11 / 12 / 13、Ubuntu 20.04 / 22.04 / 24.04（AMD64 / ARM64），纯开源 Shell 文本无闭源二进制，修改前自动保存原厂快照，随时可一键还原。
 
 ---
 
